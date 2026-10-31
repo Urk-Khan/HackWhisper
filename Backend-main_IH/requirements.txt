@@ -3,7 +3,7 @@
 # "rnnoise" enables background noise suppression on caller audio (bot.py's
 # _build_noise_filter) — free, local, no API key. Safe to remove if you'd rather not add the
 # dependency; bot.py detects its absence and runs without it.
-pipecat-ai[anthropic,openai,cartesia,silero,websocket,runner,rnnoise]==1.8.1
+pipecat-ai[anthropic,google,openai,cartesia,silero,websocket,runner,rnnoise]==1.8.1
 
 python-dotenv>=1.0.1
 aiohttp>=3.9.0

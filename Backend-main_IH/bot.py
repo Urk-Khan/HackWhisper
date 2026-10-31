@@ -6,7 +6,7 @@ Features:
 - STT & TTS: Cartesia (Ink-Whisper STT, Sonic TTS) with Silero VAD and Smart Turn.
 - Automatic Event Management: Daily Full Fetch + Upsert + Historical Versioning
   from the Hacktoberfest Events API (https://hacktoberfest-api.mlh.com/api/events).
-- AI Response Tools (GPT Function Calling):
+- AI Response Tools (LLM Function Calling):
   * search_events(city)
   * get_event_details(event_id)
   * get_registration_link(event_id)
@@ -195,8 +195,8 @@ def _build_tts_service():
 
 
 def _build_llm_service():
-    """openai or anthropic — configured via LLM_PROVIDER in .env."""
-    provider = os.getenv("LLM_PROVIDER", "openai").lower()
+    """gemini or anthropic — configured via LLM_PROVIDER in .env."""
+    provider = os.getenv("LLM_PROVIDER", "gemini").lower()
 
     if provider == "anthropic":
         from pipecat.services.anthropic.llm import AnthropicLLMService
@@ -210,17 +210,18 @@ def _build_llm_service():
                 max_tokens=120,
             ),
         )
-    elif provider == "openai":
-        from pipecat.services.openai.llm import OpenAILLMService
+    elif provider == "gemini":
+        from pipecat.services.google.llm import GoogleLLMService
 
-        model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        return OpenAILLMService(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            settings=OpenAILLMService.Settings(
-                model=model_name,
+        # Gemma 4 thinks before it answers, and that thinking counts toward max_tokens.
+        # Thinking can't be turned off on this model, so the cap leaves room for it.
+        return GoogleLLMService(
+            api_key=os.getenv("GEMINI_API_KEY"),
+            settings=GoogleLLMService.Settings(
+                model=os.getenv("GEMINI_MODEL", "gemma-4-26b-a4b-it"),
                 system_instruction=get_system_prompt(),
                 temperature=0.3,
-                max_completion_tokens=120,
+                max_tokens=1024,
             ),
         )
     else:
