@@ -211,17 +211,18 @@ def _build_llm_service():
             ),
         )
     elif provider == "gemini":
-        from pipecat.services.google.llm import GoogleLLMService
+        from gemma_llm import GemmaLLMService
 
-        # Gemma 4 thinks before it answers, and that thinking counts toward max_tokens.
-        # Thinking can't be turned off on this model, so the cap leaves room for it.
-        return GoogleLLMService(
+        # Gemma thinking is set to minimal (see gemma_llm.py). The cap stays at 1024
+        # so a reply still fits if the model thinks more than expected.
+        return GemmaLLMService(
             api_key=os.getenv("GEMINI_API_KEY"),
-            settings=GoogleLLMService.Settings(
+            settings=GemmaLLMService.Settings(
                 model=os.getenv("GEMINI_MODEL", "gemma-4-26b-a4b-it"),
                 system_instruction=get_system_prompt(),
                 temperature=0.3,
                 max_tokens=1024,
+                thinking=GemmaLLMService.minimal_thinking(),
             ),
         )
     else:
