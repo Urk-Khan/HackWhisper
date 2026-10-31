@@ -158,6 +158,6 @@ async def send_event_email(
             logger.error(f"Resend request failed: {e}")
             return {"success": False, "error": "email_network_error"}
 
-    # Mock mode if neither is configured
-    logger.warning("Neither Gmail credentials nor RESEND_API_KEY set. Simulating email dispatch.")
-    return {"success": True, "mock": True, "error": None}
+    # Nothing is sent without credentials, so report the failure instead of pretending.
+    logger.error("Email not sent: GMAIL_USER + GMAIL_APP_PASSWORD or RESEND_API_KEY are not set.")
+    return {"success": False, "error": "email_not_configured"}

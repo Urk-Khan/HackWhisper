@@ -117,13 +117,8 @@ async def send_event_sms(
             return {"success": False, "error": "network_exception"}
 
     else:
-        logger.warning(
-            "Neither TELNYX_API_KEY nor SIGNALWIRE credentials found in .env. Mocking SMS dispatch."
+        # Nothing is sent without credentials, so report the failure instead of pretending.
+        logger.error(
+            "SMS not sent: TELNYX_API_KEY + TELNYX_PHONE_NUMBER (or SIGNALWIRE credentials) are not set."
         )
-        return {
-            "success": True,
-            "mock": True,
-            "error": None,
-            "message": message_text,
-            "note": "SMS simulated in dev mode (configure TELNYX_API_KEY to send live)",
-        }
+        return {"success": False, "error": "sms_not_configured"}
