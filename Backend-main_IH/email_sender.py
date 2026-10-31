@@ -39,7 +39,8 @@ def _send_via_gmail_sync(
             server.ehlo()
             server.starttls()
             server.ehlo()
-            server.login(gmail_user, gmail_app_password)
+            clean_pass = gmail_app_password.replace(" ", "")
+            server.login(gmail_user, clean_pass)
             server.sendmail(gmail_user, [to], msg.as_string())
 
         logger.info(f"Event email successfully dispatched via Gmail SMTP to {to}")
