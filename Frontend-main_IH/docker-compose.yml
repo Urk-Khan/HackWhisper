@@ -11,3 +11,6 @@ services:
     environment:
       - PORT=3000
       - NODE_ENV=production
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-gW9!xT2&vL8}
+      - SESSION_SECRET=${SESSION_SECRET:-a8f3b2c9e1d4f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1}
+      - DATABASE_URL=${DATABASE_URL}
