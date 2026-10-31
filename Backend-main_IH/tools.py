@@ -7,7 +7,6 @@ Tools exposed to the LLM:
 2. get_event_details(event_id) -> detailed event info (date, time, venue, format)
 3. get_registration_link(event_id) -> registration & website URLs
 4. send_event_email(email, event_id) -> sends event details & link via Resend
-5. send_event_sms(phone_number, event_id) -> sends event details & link via Telnyx SMS
 6. transfer_to_human(reason) -> live call bridging to a human specialist
 7. end_call(farewell) -> polite termination
 """
@@ -181,7 +180,7 @@ async def get_event_details(params: FunctionCallParams, event_id: str):
 async def get_registration_link(params: FunctionCallParams, event_id: str):
     """Get the official registration link and web link for a Hacktoberfest event.
     Use this when the caller asks how to register or asks for the link. You can offer
-    to send it to their phone via SMS or to their email address.
+    to send it to their email address.
 
     Args:
         event_id: The event ID or slug.
@@ -202,7 +201,7 @@ async def get_registration_link(params: FunctionCallParams, event_id: str):
         "event_name": ev["name"],
         "registration_url": reg_url,
         "website_url": ev.get("website_url"),
-        "can_send_via": ["sms", "email"],
+        "can_send_via": ["email"],
     })
 
 
@@ -418,7 +417,6 @@ HACKTOBERFEST_TOOLS = [
     get_event_details,
     get_registration_link,
     send_event_email,
-    send_event_sms,
     transfer_to_human,
     end_call,
 ]

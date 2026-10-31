@@ -11,7 +11,6 @@ Features:
   * get_event_details(event_id)
   * get_registration_link(event_id)
   * send_event_email(email, event_id)
-  * send_event_sms(phone_number, event_id)
   * transfer_to_human(reason)
   * end_call(farewell)
 - Live audio recording and call transcript persistence.
