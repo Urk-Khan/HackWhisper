@@ -108,17 +108,42 @@ async def init_db() -> None:
         logger.error(f"Error initializing database schema: {e}")
 
 
+def _parse_iso_datetime(val: Optional[str]) -> Optional[datetime]:
+    """Parses ISO timestamp string to timezone-aware datetime object for asyncpg."""
+    if not val or not isinstance(val, str):
+        return None
+    try:
+        clean = val.strip().replace("Z", "+00:00")
+        return datetime.fromisoformat(clean)
+    except Exception:
+        return None
+
+
+def _to_float(v: Any) -> Optional[float]:
+    """Safely converts value to float for DOUBLE PRECISION columns."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return None
+
+
 def _normalize_event_payload(item: dict) -> dict:
     """Extracts and cleans fields from raw MLH Hacktoberfest API item."""
     addr = item.get("address") or {}
+    starts_raw = item.get("startsAt")
+    ends_raw = item.get("endsAt")
     return {
         "id": str(item.get("id") or item.get("slug") or ""),
         "name": (item.get("name") or "").strip(),
         "slug": (item.get("slug") or "").strip(),
         "format": (item.get("format") or "").strip(),
         "status": (item.get("status") or "").strip(),
-        "starts_at": item.get("startsAt"),
-        "ends_at": item.get("endsAt"),
+        "starts_at": _parse_iso_datetime(starts_raw),
+        "ends_at": _parse_iso_datetime(ends_raw),
+        "starts_at_str": starts_raw or "",
+        "ends_at_str": ends_raw or "",
         "timezone": item.get("timeZone") or "UTC",
         "description": (item.get("description") or "").strip(),
         "city": (addr.get("city") or "").strip(),
@@ -127,8 +152,8 @@ def _normalize_event_payload(item: dict) -> dict:
         "address_line1": (addr.get("line1") or "").strip(),
         "address_line2": (addr.get("line2") or "").strip(),
         "postal_code": (addr.get("postalCode") or "").strip(),
-        "latitude": addr.get("latitude"),
-        "longitude": addr.get("longitude"),
+        "latitude": _to_float(addr.get("latitude")),
+        "longitude": _to_float(addr.get("longitude")),
         "website_url": (item.get("websiteUrl") or "").strip(),
         "registration_url": (item.get("registrationUrl") or "").strip(),
         "logo_url": (item.get("logoUrl") or "").strip(),
@@ -221,7 +246,7 @@ async def sync_events() -> dict:
                                 postal_code, latitude, longitude, website_url, registration_url,
                                 logo_url, raw_data, version, created_at, updated_at
                             ) VALUES (
-                                $1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8,
+                                $1, $2, $3, $4, $5, $6, $7, $8,
                                 $9, $10, $11, $12, $13, $14,
                                 $15, $16, $17, $18, $19,
                                 $20, $21::jsonb, 1, NOW(), NOW()
@@ -274,7 +299,7 @@ async def sync_events() -> dict:
                                 """
                                 UPDATE events SET
                                     name = $2, slug = $3, format = $4, status = $5,
-                                    starts_at = $6::timestamptz, ends_at = $7::timestamptz,
+                                    starts_at = $6, ends_at = $7,
                                     timezone = $8, description = $9, city = $10, state = $11,
                                     country = $12, address_line1 = $13, address_line2 = $14,
                                     postal_code = $15, latitude = $16, longitude = $17,
