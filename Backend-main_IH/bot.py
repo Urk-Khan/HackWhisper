@@ -1,29 +1,20 @@
 """
-Innoventix Hub — Pipecat voice pipeline (pipecat-ai 1.8.1 API).
+HackWhisper — Hacktoberfest AI Voice Calling Agent (Pipecat 1.8.1 pipeline).
 
-Cascade pipeline: Telnyx audio in -> RNNoise background-noise suppression (if installed) ->
-Cartesia STT -> LLM (English-only, with meeting-booking and lead-tracking tools) -> Cartesia
-TTS -> Telnyx audio out. STT and TTS always use Cartesia. LLM provider is picked at runtime
-from .env (LLM_PROVIDER: openai or anthropic).
-
-The greeting is spoken directly (randomly chosen from prompts.GREETINGS_EN) without an LLM
-call, so it starts the instant the call connects. The caller's phone number is looked up in
-Supabase (booking_db.get_customer_by_phone) right after — if they're an existing customer,
-their purchase history is injected into the LLM's context so it can consider a cross-sell,
-per prompts.py's SCENARIO 3. This lookup runs while the greeting is already playing, not
-before it, so it costs no perceptible delay.
-
-No N8N anywhere — check_availability/book_meeting talk straight to Cal.com's v2 API
-(cal_com.py), confirmations go out via email_sender.py, and everything gets logged to
-Supabase (booking_db.py). See PROJECT_DOCUMENTATION.md for the full architecture writeup.
-
-Run with:
-    python bot.py
-
-This one command does everything: starts a cloudflared tunnel, updates your Telnyx TeXML
-Application's Voice URL automatically, pre-warms the VAD model and Cartesia's connection
-path, then starts Pipecat's built-in server (default: http://localhost:7860), which serves
-the Telnyx WebSocket at /ws.
+Features:
+- Telephony inbound pipeline: Telnyx / SignalWire WebSockets (8kHz PSTN audio).
+- STT & TTS: Cartesia (Ink-Whisper STT, Sonic TTS) with Silero VAD and Smart Turn.
+- Automatic Event Management: Daily Full Fetch + Upsert + Historical Versioning
+  from the Hacktoberfest Events API (https://hacktoberfest-api.mlh.com/api/events).
+- AI Response Tools (GPT Function Calling):
+  * search_events(city)
+  * get_event_details(event_id)
+  * get_registration_link(event_id)
+  * send_event_email(email, event_id)
+  * send_event_sms(phone_number, event_id)
+  * transfer_to_human(reason)
+  * end_call(farewell)
+- Live audio recording and call transcript persistence.
 """
 
 import asyncio
@@ -49,24 +40,6 @@ if sys.platform == "win32":
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
-
-# SignalWire & Twilio compatibility (Commented out — switched back to Telnyx)
-# if os.getenv("SIGNALWIRE_PROJECT_ID"):
-#     os.environ.setdefault("TWILIO_ACCOUNT_SID", os.getenv("SIGNALWIRE_PROJECT_ID", ""))
-#     os.environ.setdefault("TWILIO_AUTH_TOKEN", os.getenv("SIGNALWIRE_API_TOKEN", ""))
-#
-# from pipecat.serializers.twilio import TwilioFrameSerializer
-#
-# _orig_twilio_init = TwilioFrameSerializer.__init__
-#
-# def _patched_twilio_init(self, *args, **kwargs):
-#     if not kwargs.get("base_url"):
-#         space_url = os.getenv("SIGNALWIRE_SPACE_URL")
-#         if space_url:
-#             kwargs["base_url"] = space_url.rstrip("/") + "/api/laml"
-#     _orig_twilio_init(self, *args, **kwargs)
-#
-# TwilioFrameSerializer.__init__ = _patched_twilio_init
 
 from loguru import logger
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -108,10 +81,11 @@ from auto_tunnel import setup_tunnel_and_telnyx
 from call_recorder import CallRecorder
 from demo_display import DemoDisplay, setup_demo_logging
 from latency_logger import LatencyLogger
-from prompts import GREETINGS_EN, INNOVENTIX_SYSTEM_PROMPT, get_system_prompt
-from tools import INNOVENTIX_TOOLS
+from prompts import GREETINGS_EN, HACKTOBERFEST_SYSTEM_PROMPT, get_system_prompt
+from tools import HACKTOBERFEST_TOOLS, INNOVENTIX_TOOLS
 from warmup import warmup_all
 import booking_db
+import event_manager
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -174,7 +148,10 @@ class TelephonyWebhookMiddleware(BaseHTTPMiddleware):
             return HTMLResponse(content="<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response/>", media_type="application/xml")
 
         elif request.method == "GET" and path in ("/", "/voice", "/health"):
-            return HTMLResponse(content="<h1>Innoventix Hub Voice Agent Online</h1>", media_type="text/html")
+            return HTMLResponse(
+                content="<h1>HackWhisper — Hacktoberfest AI Voice Calling Agent Online</h1>",
+                media_type="text/html",
+            )
 
         return await call_next(request)
 
@@ -184,11 +161,6 @@ runner_module.app.add_middleware(
 )
 
 # VAD parameters tuned for fast telephony responsiveness (8kHz PSTN/SIP audio).
-# confidence=0.70 — speech threshold that reliably rejects line hiss and clicks while capturing normal voice.
-# min_volume=0.04 — filters low digital background noise.
-# start_secs=0.20 — 200ms voice detection ensures fast, responsive turn detection and barge-in.
-# stop_secs=0.60 — 600ms silence threshold before turn end. Provides natural conversational rhythm,
-# avoids Pipecat STT p99 timeout collapse, and reduces turn turnaround latency by ~600ms.
 VAD_PARAMS = VADParams(
     confidence=0.70,
     min_volume=0.04,
@@ -223,7 +195,7 @@ def _build_tts_service():
 
 
 def _build_llm_service():
-    """openai or anthropic — both cloud APIs, both require a key."""
+    """openai or anthropic — configured via LLM_PROVIDER in .env."""
     provider = os.getenv("LLM_PROVIDER", "openai").lower()
 
     if provider == "anthropic":
@@ -241,7 +213,7 @@ def _build_llm_service():
     elif provider == "openai":
         from pipecat.services.openai.llm import OpenAILLMService
 
-        model_name = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
+        model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         return OpenAILLMService(
             api_key=os.getenv("OPENAI_API_KEY"),
             settings=OpenAILLMService.Settings(
@@ -256,26 +228,22 @@ def _build_llm_service():
 
 
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> None:
-    """Run the voice bot for one incoming call session."""
-    logger.info("Starting Innoventix Hub session")
+    """Run the voice bot for one incoming Hacktoberfest call session."""
+    logger.info("Starting HackWhisper session")
     _call_start_time = __import__("time").time()
 
     stt = _build_stt_service()
     tts = _build_tts_service()
     llm = _build_llm_service()
 
-    context = LLMContext(tools=INNOVENTIX_TOOLS)
+    context = LLMContext(tools=HACKTOBERFEST_TOOLS)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(params=VAD_PARAMS),
-            # VAD-only start: prevents partial STT hypothesis jitter from triggering premature barge-in
             user_turn_strategies=UserTurnStrategies(
                 start=[VADUserTurnStartStrategy()]
             ),
-            # MuteUntilFirstBotComplete: mutes only during initial greeting so connection clicks
-            # don't interrupt greeting. Afterwards user is unmuted for normal barge-in.
-            # FunctionCallUserMuteStrategy: mutes user during backend API tool calls.
             user_mute_strategies=[
                 MuteUntilFirstBotCompleteUserMuteStrategy(),
                 FunctionCallUserMuteStrategy(),
@@ -301,7 +269,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
             call_data.get("call_id") if isinstance(call_data, dict) else None
         )
 
-    # Initialize non-blocking audio recorder for this call session
+    # Audio recorder for this call session
     recorder = CallRecorder(
         output_dir="call_recordings",
         caller_phone=caller_phone,
@@ -338,7 +306,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
             return
         call_state["db_saved"] = True
 
-        # 1. Save audio recording if not already saved
+        # 1. Save audio recording
         if not call_state["rec_path"]:
             try:
                 call_state["rec_path"] = await recorder.save()
@@ -349,9 +317,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
         dur = __import__("time").time() - _call_start_time
         DemoDisplay.call_ended(dur, call_state["rec_path"])
 
-        # 3. Guaranteed save of call record (transcript, duration, outcome) to Supabase
+        # 3. Persist call record to database
         try:
-            await booking_db.save_call_record(
+            await event_manager.save_call_record(
                 call_id=runner_args.session_id,
                 caller_phone=caller_phone,
                 start_time=_call_start_time,
@@ -359,14 +327,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
                 explicit_outcome=call_state.get("outcome"),
             )
         except Exception as e:
-            logger.warning(f"save_call_record raised unexpectedly: {e}")
+            logger.warning(f"save_call_record raised: {e}")
 
     worker = PipelineWorker(
         pipeline,
         params=PipelineParams(
             enable_metrics=True,
             enable_usage_metrics=True,
-            audio_in_sample_rate=8000,  # Telnyx/SignalWire PSTN audio is 8kHz
+            audio_in_sample_rate=8000,
             audio_out_sample_rate=8000,
         ),
         app_resources={
@@ -383,30 +351,24 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
         logger.info(f"Call connected, caller={caller_phone}")
         DemoDisplay.call_started(caller_phone, runner_args.session_id)
 
-        # The greeting is spoken via TTS. assistant_aggregator automatically records
-        # the spoken greeting in context, so no duplicate manual context.add_message is needed.
+        # Spoken greeting
         greeting = random.choice(GREETINGS_EN)
         DemoDisplay.bot_said(greeting)
         await worker.queue_frames([TTSSpeakFrame(greeting)])
 
-        # Runs while the greeting is already playing rather than blocking it — it only needs
-        # to land in context before the LLM's first real inference, which can't happen until
-        # the caller finishes speaking their first sentence, comfortably longer than this
-        # Supabase round-trip.
-        customer = await booking_db.get_customer_by_phone(caller_phone) if caller_phone else None
-        if customer:
-            purchased = customer.get("purchased_services") or "no specific services on file"
-            context.add_message(
-                {
-                    "role": "user",
-                    "content": (
-                        f"[KNOWN CALLER CONTEXT: This caller is an existing customer, "
-                        f"name={customer.get('name', 'unknown')}, purchased={purchased}. "
-                        f"Use this per the CROSS-SELL scenario in your instructions — never "
-                        f"mention this context to the caller directly.]"
-                    ),
-                }
-            )
+        # Check caller context asynchronously
+        if caller_phone:
+            prev = await booking_db.get_customer_by_phone(caller_phone)
+            if prev:
+                context.add_message(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"[CALLER CONTEXT: Caller previously received event details via {prev.get('last_channel', 'sms/email')}. "
+                            f"Be welcoming and ready to assist with further Hacktoberfest events.]"
+                        ),
+                    }
+                )
 
     @user_aggregator.event_handler("on_user_turn_started")
     async def on_user_turn_started(aggregator, strategy):
@@ -434,11 +396,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
 
     @user_aggregator.event_handler("on_user_turn_idle")
     async def on_user_turn_idle(aggregator):
-        """Re-prompt when the caller has been silent too long (user_idle_timeout seconds).
-        Prevents dead-air situations where STT missed the caller's speech or the caller
-        drifted away. Matches the system prompt's instruction: 'If the caller goes silent,
-        gently prompt once ("Hello, are you still there?")'. Only prompts once per idle
-        cycle — the timer resets when the caller next speaks."""
         logger.info("User idle — sending re-prompt")
         reprompt = "Hello, are you still there?"
         DemoDisplay.bot_said(reprompt)
@@ -459,31 +416,17 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments) -> Non
 
 
 def _build_noise_filter():
-    """Reduces background noise (fans, traffic, TV, general ambient sound) on incoming
-    caller audio, before it reaches VAD/STT — fewer false interruptions from noise, cleaner
-    transcription. Free, fully local, no account or API key (unlike Krisp VIVA/Arctan/AIC,
-    which do full voice ISOLATION — actually separating two simultaneous human voices — but
-    require a paid SDK license; see PROJECT_DOCUMENTATION.md if RNNoise isn't enough for a
-    consistently noisy environment).
-
-    Guarded because the `rnnoise` extra is optional: if it isn't installed, the bot should
-    still run exactly as before rather than crash on startup.
-    """
     try:
         import pyrnnoise  # noqa: F401
         from pipecat.audio.filters.rnnoise_filter import RNNoiseFilter
 
         return RNNoiseFilter()
     except ImportError:
-        logger.warning(
-            "RNNoise not installed — running without background noise suppression. "
-            'Run `pip install "pipecat-ai[rnnoise]"` to enable it.'
-        )
+        logger.warning("RNNoise not installed — running without background noise suppression.")
         return None
 
 
 async def bot(runner_args: RunnerArguments):
-    """Entry point the Pipecat runner calls for each new connection."""
     transport_params = {
         "telnyx": lambda: FastAPIWebsocketParams(
             audio_in_enabled=True,
@@ -498,15 +441,6 @@ async def bot(runner_args: RunnerArguments):
     }
 
     transport = await create_transport(runner_args, transport_params)
-
-    call_data = runner_args.call_data
-    caller_phone = None
-    if call_data:
-        caller_phone = getattr(call_data, "from_number", None) or (
-            call_data.get("from") if isinstance(call_data, dict) else None
-        )
-        logger.info(f"From number: {caller_phone}")
-
     await run_bot(transport, runner_args)
 
 
@@ -519,9 +453,10 @@ if __name__ == "__main__":
     _HOST = os.getenv("HOST", "0.0.0.0")
 
     async def _startup():
-        (tunnel_process, tunnel_hostname), _ = await asyncio.gather(
+        (tunnel_process, tunnel_hostname), _, _ = await asyncio.gather(
             setup_tunnel_and_telnyx(_PORT),
             warmup_all(),
+            event_manager.start_daily_sync_scheduler(),
         )
         return tunnel_process, tunnel_hostname
 
@@ -557,7 +492,6 @@ if __name__ == "__main__":
     phone_number = os.getenv("TELNYX_PHONE_NUMBER", "+1 (855) 501-0702")
     DemoDisplay.banner(phone_number, provider_name)
 
-    # Silence Pipecat's noisy ASCII runner banner and quiet Uvicorn access/lifecycle logs
     runner_module._print_dev_runner_banner = lambda: None
     _orig_uvicorn_run = runner_module.uvicorn.run
 
@@ -567,11 +501,9 @@ if __name__ == "__main__":
 
     runner_module.uvicorn.run = _quiet_uvicorn_run
 
-    # Re-apply setup_demo_logging once FastAPI boots to prevent main() from resetting sinks
     @runner_module.app.on_event("startup")
     def _on_app_startup():
         setup_demo_logging()
 
     setup_demo_logging()
     main()
-

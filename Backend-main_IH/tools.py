@@ -1,51 +1,52 @@
 """
-Function-calling tools exposed to the LLM (Pipecat 1.8.1 API).
+Function-calling tools for HackWhisper: AI Hacktoberfest Voice Calling Agent.
 
-Pipecat auto-generates each tool's schema from its name, type hints, and docstring — list
-these on the LLMContext: LLMContext(tools=INNOVENTIX_TOOLS).
-
-Scheduling backend: Cal.com (cal_com.py) — replaces Calendly (calendly.py is now parked,
-same as the earlier Google Sheets/Calendar attempt before it, and email_sender.py). Easy to
-revert to either later without rebuilding from scratch, since all three keep the same
-get_open_slots/book_slot/format_display interface.
-
-No N8N anywhere — every tool talks to its backend directly via aiohttp.
+Pipecat auto-generates tool schemas from function names, type hints, and docstrings.
+Tools exposed to the LLM:
+1. search_events(city) -> city-wise and regional event discovery
+2. get_event_details(event_id) -> detailed event info (date, time, venue, format)
+3. get_registration_link(event_id) -> registration & website URLs
+4. send_event_email(email, event_id) -> sends event details & link via Resend
+5. send_event_sms(phone_number, event_id) -> sends event details & link via Telnyx SMS
+6. transfer_to_human(reason) -> live call bridging to a human specialist
+7. end_call(farewell) -> polite termination
 """
-
-from loguru import logger
-from pipecat.frames.frames import EndWorkerFrame, TTSSpeakFrame
-from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.llm_service import FunctionCallParams
 
 import asyncio
 import os
 import re
+from loguru import logger
+from typing import Any
 
+try:
+    from pipecat.frames.frames import EndWorkerFrame, TTSSpeakFrame
+    from pipecat.processors.frame_processor import FrameDirection
+    from pipecat.services.llm_service import FunctionCallParams
+except ImportError:
+    EndWorkerFrame = None
+    TTSSpeakFrame = None
+    FrameDirection = None
+    FunctionCallParams = Any
 import aiohttp
 
-import booking_db
-import cal_com as scheduler
 from demo_display import DemoDisplay
 import email_sender
+import event_manager
+import sms_sender
 
 
 def _normalize_email(raw: str) -> str:
     """Convert spoken email transcriptions to clean, valid addresses.
     Handles forms like:
-      'junaid dot khan at innoventix hub dot tech' -> 'junaid.khan@innoventixhub.tech'
-      'j-u-n-a-i-d dot k-h-a-n at innoventixhub dot tech' -> 'junaid.khan@innoventixhub.tech'
-      'alex underscore smith at acme dot co dot uk' -> 'alex_smith@acme.co.uk'
-      'john dot doe at gmail dot com' -> 'john.doe@gmail.com'
-      'junaid dot k zero triple three at gmail dot com' -> 'junaid.k0333@gmail.com'
-    Strips accidental whitespace, brackets, spelled dashes, and fixes common telephony domain slips.
+      'junaid dot khan at gmail dot com' -> 'junaid.khan@gmail.com'
+      'j-u-n-a-i-d dot k zero triple three at gmail dot com' -> 'junaid.k0333@gmail.com'
     """
     if not raw:
         return ""
     s = str(raw).lower().strip()
-    # Strip enclosing punctuation or quotes
     s = s.strip("<>()[]\"'` \t\r\n.,;:")
 
-    # Normalize spoken words and bracketed variations
+    # Spoken syntax normalization
     s = re.sub(r"[\(\[\{]\s*(?:dot|point|\.)\s*[\)\]\}]", ".", s)
     s = re.sub(r"[\(\[\{]\s*(?:at|@)\s*[\)\]\}]", "@", s)
     s = re.sub(r"\b(?:dot|point)\b", ".", s)
@@ -53,15 +54,13 @@ def _normalize_email(raw: str) -> str:
     s = re.sub(r"\b(?:underscore)\b", "_", s)
     s = re.sub(r"\b(?:dash|hyphen)\b", "-", s)
 
-    # Common speech-to-text slips for major global providers (Gmail, Outlook, Yahoo, Hotmail, iCloud)
+    # Provider audio fixes
     s = re.sub(r"@\s*(?:g\s*mail|gee\s*mail)\b", "@gmail", s)
     s = re.sub(r"@\s*(?:out\s*look)\b", "@outlook", s)
     s = re.sub(r"@\s*(?:hot\s*mail)\b", "@hotmail", s)
     s = re.sub(r"@\s*(?:i\s*cloud|eye\s*cloud)\b", "@icloud", s)
     s = re.sub(r"@\s*(?:ya\s*hoo)\b", "@yahoo", s)
 
-    # Convert spoken numbers and multipliers in email usernames:
-    # 'triple three' / 'triple t' -> '333', 'double zero' -> '00', 'zero' -> '0'
     _word_to_digit = {
         "zero": "0", "oh": "0", "o": "0",
         "one": "1", "two": "2", "to": "2", "too": "2",
@@ -91,299 +90,259 @@ def _normalize_email(raw: str) -> str:
     ]:
         s = re.sub(rf"\b{w}\b", d, s)
 
-    # Collapse spelled-out letters with dashes or spaces: 'j-u-n-a-i-d' or 'j u n a i d' -> 'junaid'
+    # Collapse spelled-out letters
     for _ in range(12):
         s = re.sub(r"(?<=\b[a-z0-9])[- ]+(?=[a-z0-9]\b)", "", s)
 
-    # Remove all remaining whitespace
     s = re.sub(r"\s+", "", s)
-
-    # Strip stray periods around @ or ends
     s = re.sub(r"\.+@", "@", s)
     s = re.sub(r"@\.+", "@", s)
-    s = s.strip(".")
-
-    # Common domain corrections for Innoventix Hub emails
-    if "@innoventix" in s:
-        s = re.sub(r"@innoventix(?:hub)?\.[a-z0-9.]+$", "@innoventixhub.tech", s)
-        s = re.sub(r"@innoventix$", "@innoventixhub.tech", s)
-        s = re.sub(r"@innoventixhub$", "@innoventixhub.tech", s)
-
-    return s
+    return s.strip(".")
 
 
-async def check_availability(params: FunctionCallParams, meeting_type: str):
-    """Look up currently open meeting slots across the upcoming week. ONLY call this once the
-    caller has clearly agreed to schedule or book a call with the team.
-
-    Do NOT call this speculatively while still just discussing services or answering questions.
-    The results stay valid for the rest of this call, so re-use what you already got rather than
-    re-checking.
-
-    Returns open date/time options across the available days of the week, with a week summary.
-    Present 2-3 open options across different days naturally, or focus on a specific day if the
-    caller asked for it.
+async def search_events(params: FunctionCallParams, city: str):
+    """Search for Hacktoberfest events taking place in a specific city, region, or topic.
+    Always call this when the caller asks what events are happening in their city or area.
 
     Args:
-        meeting_type: "sales" for anything involving buying a service, a cross-sell pitch,
-            or general purchase interest. "support" only when the caller has an unresolved
-            issue with a service they already have that you (the AI) genuinely could not
-            answer from your own knowledge.
+        city: The name of the city, state, or region (e.g. 'Kolkata', 'London', 'Berlin', 'New York').
     """
-    DemoDisplay.tool_action(f"Checking calendar availability for {meeting_type} meeting...")
-    slots = await scheduler.get_open_slots(meeting_type, limit=20)
+    DemoDisplay.tool_action(f"Searching Hacktoberfest events in {city}...")
+    results = await event_manager.search_events_by_city(city, limit=4)
 
-    if not slots:
-        DemoDisplay.tool_result("No open slots found in the upcoming schedule.")
+    if not results:
+        DemoDisplay.tool_result(f"No specific events found in {city}.")
         await params.result_callback({
             "success": True,
-            "slots": [],
-            "available_days": [],
-            "week_summary": "No open slots found in the upcoming schedule.",
+            "found": False,
+            "city": city,
+            "message": f"No local events found specifically for '{city}'. Many Hacktoberfest events are virtual and accessible worldwide on hacktoberfest.com.",
+            "events": [],
         })
         return
 
-    # Extract distinct available days
-    seen_days = []
-    for s in slots:
-        d = s.get("date", "")
-        if d and d not in seen_days:
-            seen_days.append(d)
+    DemoDisplay.tool_result(f"Found {len(results)} events in {city}")
+    formatted = []
+    for ev in results:
+        formatted.append({
+            "event_id": ev["id"],
+            "name": ev["name"],
+            "city": ev["city"],
+            "country": ev["country"],
+            "status": ev["status"],
+            "date_time": ev["starts_at_str"],
+            "format": ev["format"],
+        })
 
-    week_summary = f"Openings available across {len(seen_days)} days this week: {', '.join(seen_days)}."
-    DemoDisplay.tool_result(f"Found openings across {len(seen_days)} days ({', '.join(seen_days[:3])})")
-
-    await params.result_callback(
-        {
-            "success": True,
-            "week_summary": week_summary,
-            "available_days": seen_days,
-            "slots": [
-                {
-                    "weekday": s.get("weekday", ""),
-                    "date": s["date"],
-                    "time": s["time"],
-                    "start_time": s["start_time"],
-                }
-                for s in slots
-            ],
-        }
-    )
+    await params.result_callback({
+        "success": True,
+        "found": True,
+        "city": city,
+        "count": len(formatted),
+        "events": formatted,
+    })
 
 
-async def book_meeting(
-    params: FunctionCallParams,
-    meeting_type: str,
-    start_time: str,
-    customer_name: str,
-    email: str,
-    topic: str,
-    phone: str = "",
-):
-    """Book a meeting once the caller has picked a specific open time and confirmed their
-    details. `start_time` MUST be copied EXACTLY as it came back from check_availability's
-    results — it's an internal identifier, don't reformat it, don't construct your own.
+async def get_event_details(params: FunctionCallParams, event_id: str):
+    """Retrieve in-depth details for a specific Hacktoberfest event, including date, time,
+    venue address, format, and overview.
 
     Args:
-        meeting_type: "sales" or "support" — same value used in the check_availability call
-            that produced this start_time.
-        start_time: The exact start_time string from check_availability's results.
-        customer_name: Caller's name.
-        email: Caller's email address — required, Cal.com's confirmation and the video
-            link go here.
-        topic: A SPECIFIC one-line summary of what will be discussed — e.g. "AI Automation
-            pricing for a 10-person sales team" or "Invoice #4521 billing discrepancy", not
-            a generic "sales call" or "support issue". This is what the rep sees before the
-            meeting, so vague topics leave them unprepared.
-        phone: Caller's phone number. Leave blank — the system already has it from caller
-            ID, don't ask the caller for it.
+        event_id: The event ID or slug returned from search_events.
+    """
+    DemoDisplay.tool_action(f"Fetching details for event {event_id[:16]}...")
+    ev = await event_manager.get_event_by_id_or_name(event_id)
+
+    if not ev:
+        DemoDisplay.tool_result("Event details not found")
+        await params.result_callback({
+            "success": False,
+            "error": "event_not_found",
+            "message": f"Could not find details for event ID '{event_id}'.",
+        })
+        return
+
+    DemoDisplay.tool_result(f"Fetched details for {ev['name'][:30]}")
+    await params.result_callback({
+        "success": True,
+        "event_id": ev["id"],
+        "name": ev["name"],
+        "city": ev.get("city", "TBA"),
+        "venue_address": ev.get("address") or ev.get("city") or "Online / In-person",
+        "starts_at": ev.get("starts_at_str", "TBA"),
+        "ends_at": ev.get("ends_at_str", "TBA"),
+        "format": ev.get("format", "Hack Day"),
+        "status": ev.get("status", "Active"),
+        "description_summary": (ev.get("description") or "")[:280],
+        "registration_url": ev.get("registration_url") or ev.get("website_url"),
+    })
+
+
+async def get_registration_link(params: FunctionCallParams, event_id: str):
+    """Get the official registration link and web link for a Hacktoberfest event.
+    Use this when the caller asks how to register or asks for the link. You can offer
+    to send it to their phone via SMS or to their email address.
+
+    Args:
+        event_id: The event ID or slug.
+    """
+    DemoDisplay.tool_action(f"Looking up registration URL for {event_id[:16]}...")
+    ev = await event_manager.get_event_by_id_or_name(event_id)
+
+    if not ev:
+        await params.result_callback({"success": False, "error": "event_not_found"})
+        return
+
+    reg_url = ev.get("registration_url") or ev.get("website_url") or "https://hacktoberfest.com/fests"
+    DemoDisplay.tool_result(f"Registration URL: {reg_url[:40]}...")
+
+    await params.result_callback({
+        "success": True,
+        "event_id": ev["id"],
+        "event_name": ev["name"],
+        "registration_url": reg_url,
+        "website_url": ev.get("website_url"),
+        "can_send_via": ["sms", "email"],
+    })
+
+
+async def send_event_email(
+    params: FunctionCallParams,
+    email: str,
+    event_id: str,
+    attendee_name: str = "Hacker",
+):
+    """Send Hacktoberfest event details and registration link directly to the caller's email.
+    Always repeat the email address back to confirm before calling this tool.
+
+    Args:
+        email: The attendee's email address.
+        event_id: The ID of the event to send.
+        attendee_name: Caller's name (optional).
+    """
+    app_resources = params.app_resources or {}
+    clean_email = _normalize_email(email)
+    call_id = app_resources.get("session_id")
+
+    DemoDisplay.tool_action(f"Sending event email to {clean_email} for event {event_id[:16]}...")
+
+    ev = await event_manager.get_event_by_id_or_name(event_id)
+    if not ev:
+        DemoDisplay.tool_result("Email send failed: event not found")
+        await params.result_callback({"success": False, "error": "event_not_found"})
+        return
+
+    result = await email_sender.send_event_email(
+        to=clean_email,
+        customer_name=attendee_name,
+        event_name=ev["name"],
+        starts_at_str=ev.get("starts_at_str", "See event page"),
+        city=ev.get("city", ""),
+        venue=ev.get("address", ""),
+        description=ev.get("description", ""),
+        registration_url=ev.get("registration_url") or ev.get("website_url", ""),
+        website_url=ev.get("website_url"),
+    )
+
+    call_state = app_resources.get("call_state")
+    if isinstance(call_state, dict):
+        call_state["outcome"] = "email_sent"
+
+    await event_manager.log_notification(
+        event_id=ev["id"],
+        recipient=clean_email,
+        channel="email",
+        message=f"Event details for {ev['name']}",
+        call_id=call_id,
+        status="sent" if result["success"] else "failed",
+    )
+
+    if result["success"]:
+        DemoDisplay.tool_result(f"Event email dispatched to {clean_email}!")
+    else:
+        DemoDisplay.tool_result(f"Email error: {result.get('error')}")
+
+    await params.result_callback({
+        "success": result["success"],
+        "email": clean_email,
+        "event_name": ev["name"],
+        "error": result.get("error"),
+    })
+
+
+async def send_event_sms(
+    params: FunctionCallParams,
+    event_id: str,
+    phone_number: str = "",
+):
+    """Send Hacktoberfest event details and registration link directly via SMS text message.
+    If phone_number is not provided by the caller, the system automatically uses their caller ID.
+
+    Args:
+        event_id: The ID of the event.
+        phone_number: Destination phone number (leave blank if sending to the current caller ID).
     """
     app_resources = params.app_resources or {}
     call_id = app_resources.get("session_id")
-    caller_phone = phone or app_resources.get("caller_phone") or ""
-    email = _normalize_email(email)
+    target_phone = phone_number or app_resources.get("caller_phone") or ""
 
-    if not start_time:
-        booking_url = os.getenv("CAL_BOOKING_URL", "")
-        fallback_sent = False
-        if email and booking_url:
-            fb = await email_sender.send_booking_fallback_email(
-                to=email,
-                customer_name=customer_name,
-                booking_url=booking_url,
-            )
-            fallback_sent = fb.get("success", False)
+    if not target_phone:
         await params.result_callback({
             "success": False,
-            "error": "missing_start_time",
-            "fallback_link_sent": fallback_sent,
+            "error": "missing_phone_number",
+            "message": "I don't have a phone number to text. Could you please tell me your mobile number?",
         })
         return
 
-    DemoDisplay.tool_action(f"Booking {meeting_type} meeting for {customer_name} ({email})...")
-    result = await scheduler.book_slot(
-        meeting_type=meeting_type,
-        start_time=start_time,
-        customer_name=customer_name,
-        phone=caller_phone,
-        email=email,
-        topic=topic,
+    DemoDisplay.tool_action(f"Sending event SMS to {target_phone} for event {event_id[:16]}...")
+    ev = await event_manager.get_event_by_id_or_name(event_id)
+
+    if not ev:
+        DemoDisplay.tool_result("SMS failed: event not found")
+        await params.result_callback({"success": False, "error": "event_not_found"})
+        return
+
+    result = await sms_sender.send_event_sms(
+        to_phone=target_phone,
+        event_name=ev["name"],
+        starts_at_str=ev.get("starts_at_str", "Check registration link"),
+        city=ev.get("city", ""),
+        registration_url=ev.get("registration_url") or ev.get("website_url", ""),
+        website_url=ev.get("website_url"),
     )
 
-    if not result["success"]:
-        DemoDisplay.tool_result(f"Booking failed ({result['error']}) - sending fallback link")
-        # Fallback: if we have the caller's email, send them a direct booking link so they
-        # can still book themselves even when the API booking fails.
-        booking_url = os.getenv("CAL_BOOKING_URL", "")
-        fallback_sent = False
-        if email and booking_url:
-            fb = await email_sender.send_booking_fallback_email(
-                to=email,
-                customer_name=customer_name,
-                booking_url=booking_url,
-            )
-            fallback_sent = fb["success"]
-
-        await params.result_callback({
-            "success": False,
-            "error": result["error"],
-            "fallback_link_sent": fallback_sent,
-        })
-        return
-
-    date_str, time_str = scheduler.format_display(start_time)
     call_state = app_resources.get("call_state")
     if isinstance(call_state, dict):
-        call_state["outcome"] = "meeting_booked"
+        call_state["outcome"] = "sms_sent"
 
-    DemoDisplay.tool_result(f"Meeting booked successfully for {customer_name} on {date_str} at {time_str}!")
-    await booking_db.log_meeting(
-        meeting_type=meeting_type,
-        customer_name=customer_name,
-        phone=caller_phone,
-        email=email,
-        topic=topic,
-        date=date_str,
-        time_str=time_str,
-        meet_link=result["meet_link"],
+    await event_manager.log_notification(
+        event_id=ev["id"],
+        recipient=target_phone,
+        channel="sms",
+        message=result.get("message", f"SMS for {ev['name']}"),
         call_id=call_id,
+        status="sent" if result["success"] else "failed",
     )
 
-    # Fire-and-forget confirmation email — never fails the booking if email fails.
-    await email_sender.send_meeting_confirmation(
-        to=email,
-        customer_name=customer_name,
-        date=date_str,
-        time_str=time_str,
-        meet_link=result["meet_link"],
-        meeting_type=meeting_type,
-    )
-
-    await params.result_callback(
-        {
-            "success": True,
-            "meet_link": result["meet_link"],
-        }
-    )
-
-
-async def send_booking_link(params: FunctionCallParams, customer_name: str, email: str):
-    """Email the caller a direct link to the booking page, WITHOUT creating a real meeting.
-    Use this when the caller wants a link to book themselves instead of picking a time live
-    on the call, or when no open slot from check_availability works for their schedule.
-
-    Never call `book_meeting` with a slot the caller hasn't actually chosen just to trigger
-    an email — that creates a real meeting they never agreed to. This tool is the correct
-    way to "just send a link": it only sends an email, it never touches the calendar.
-
-    Args:
-        customer_name: Caller's name.
-        email: Caller's email address — read it back and get an explicit "yes" from the
-            caller before calling this, same as you would before book_meeting.
-    """
-    email = _normalize_email(email)
-    booking_url = os.getenv("CAL_BOOKING_URL", "")
-
-    app_resources = params.app_resources or {}
-    call_state = app_resources.get("call_state")
-    if isinstance(call_state, dict):
-        call_state["outcome"] = "warm_lead"
-
-    # A caller asking for an email link is a warm lead — log to leads table
-    caller_phone = app_resources.get("caller_phone") or ""
-    await booking_db.create_lead(
-        name=customer_name or "Caller",
-        phone=caller_phone,
-        interested_service="Requested Booking Link via Email",
-        reason=f"Sent booking link to {email}",
-        call_id=app_resources.get("session_id"),
-    )
-
-    DemoDisplay.tool_action(f"Sending booking link email to {customer_name} ({email})...")
-    if not email or not booking_url:
-        DemoDisplay.tool_result("Failed: missing email or booking URL")
-        await params.result_callback({"success": False, "error": "missing_email_or_url"})
-        return
-
-    result = await email_sender.send_booking_fallback_email(
-        to=email,
-        customer_name=customer_name,
-        booking_url=booking_url,
-    )
     if result["success"]:
-        DemoDisplay.tool_result(f"Booking link email sent to {email}.")
+        DemoDisplay.tool_result(f"Event SMS sent to {target_phone}!")
     else:
-        DemoDisplay.tool_result(f"Failed to send email: {result.get('error')}")
-    await params.result_callback({"success": result["success"], "error": result.get("error")})
+        DemoDisplay.tool_result(f"SMS error: {result.get('error')}")
 
-
-async def mark_potential_lead(
-    params: FunctionCallParams,
-    customer_name: str,
-    interested_service: str,
-    reason: str,
-    phone: str = "",
-):
-    """Log a caller as a warm lead when they show real interest in a service but don't
-    commit to booking right now. Only call this for genuine hesitation — "let me think
-    about it", "I need to check budget", "I need to check with my team", "maybe later" —
-    NOT for callers who explicitly say they're not interested (just end the call politely
-    for those, don't log anything), and NOT for casual info-only questions with no purchase
-    intent at all.
-
-    Args:
-        customer_name: Caller's name, if given. Use "Unknown" if they didn't share it.
-        interested_service: Which service they were considering (Content Creation, AI
-            Automation, AI Voice Agents, Web Development, or SEO).
-        reason: Short note on why they didn't commit, e.g. "wants to discuss with partner
-            first" or "comparing against another vendor".
-        phone: Leave blank — the system already has it from caller ID.
-    """
-    app_resources = params.app_resources or {}
-    caller_phone = phone or app_resources.get("caller_phone") or ""
-
-    DemoDisplay.tool_action(f"Logging warm lead: {customer_name} ({interested_service})...")
-    call_state = app_resources.get("call_state")
-    if isinstance(call_state, dict):
-        call_state["outcome"] = "warm_lead"
-
-    result = await booking_db.create_lead(
-        name=customer_name,
-        phone=caller_phone,
-        interested_service=interested_service,
-        reason=reason,
-        call_id=app_resources.get("session_id"),
-    )
-    DemoDisplay.tool_result(f"Lead saved to database (Reason: {reason})")
-    await params.result_callback({"success": result["success"], "error": result["error"]})
+    await params.result_callback({
+        "success": result["success"],
+        "phone": target_phone,
+        "event_name": ev["name"],
+        "error": result.get("error"),
+    })
 
 
 async def transfer_to_human(params: FunctionCallParams, reason: str):
-    """Transfer the caller to a live human team member right now. Use when the caller
-    explicitly asks to speak to a person, an expert, or a human agent, or for urgent issues.
+    """Transfer the caller to a live human organizer or support specialist right now.
+    Use when the caller explicitly asks to speak to an organizer or human agent.
 
     Args:
-        reason: Short reason a human was needed (e.g. "caller requested live specialist").
+        reason: Short reason human transfer was requested.
     """
     app_resources = params.app_resources or {}
     call_state = app_resources.get("call_state")
@@ -395,30 +354,20 @@ async def transfer_to_human(params: FunctionCallParams, reason: str):
     call_control_id = app_resources.get("call_control_id")
     called_phone = app_resources.get("called_phone") or os.getenv("TELNYX_PHONE_NUMBER", "").strip()
 
-    DemoDisplay.tool_action(f"Transfer requested by caller (Reason: {reason})")
+    DemoDisplay.tool_action(f"Live transfer requested (Reason: {reason})")
 
     if not transfer_phone or not telnyx_api_key or not call_control_id:
-        logger.warning(
-            f"Live transfer requested but missing config or call_control_id "
-            f"(transfer_phone={bool(transfer_phone)}, api_key={bool(telnyx_api_key)}, "
-            f"call_control_id={call_control_id}, reason={reason})"
-        )
-        DemoDisplay.tool_result("Transfer failed: missing transfer configuration")
+        DemoDisplay.tool_result("Transfer not configured")
         await params.result_callback({
             "success": False,
             "transferred": False,
             "error": "transfer_not_configured",
-            "reason_logged": reason,
         })
         return
 
-    # Announce the transfer to the caller over TTS first
-    announcement = "Please hold on for just a moment while I transfer you directly to our team."
+    announcement = "Please hold on for just a moment while I connect you with an event organizer."
     DemoDisplay.bot_said(announcement)
-    DemoDisplay.tool_action(f"Transferring caller to {transfer_phone}...")
     await params.llm.push_frame(TTSSpeakFrame(announcement))
-
-    # Give TTS audio 2.5 seconds to flush to the caller over the WebSocket leg before transferring
     await asyncio.sleep(2.5)
 
     transfer_url = f"https://api.telnyx.com/v2/calls/{call_control_id}/actions/transfer"
@@ -434,63 +383,29 @@ async def transfer_to_human(params: FunctionCallParams, reason: str):
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
             async with session.post(transfer_url, json=payload, headers=headers) as resp:
-                resp_text = await resp.text()
                 if resp.status in (200, 202):
-                    logger.info(
-                        f"Telnyx call transfer successfully initiated to {transfer_phone} "
-                        f"for call_control_id={call_control_id}"
-                    )
-                    DemoDisplay.tool_result(f"Successfully transferred to {transfer_phone}!")
+                    DemoDisplay.tool_result(f"Successfully transferred to {transfer_phone}")
                     await params.result_callback({
                         "success": True,
                         "transferred": True,
                         "transferred_to": transfer_phone,
                     })
-                    # Signal shutdown of the AI bot worker since the call is now bridged to human
                     await params.llm.push_frame(EndWorkerFrame(), FrameDirection.UPSTREAM)
                     return
                 else:
-                    logger.error(
-                        f"Telnyx transfer API failed (HTTP {resp.status}): {resp_text}"
-                    )
                     DemoDisplay.tool_result(f"Transfer failed: HTTP {resp.status}")
-                    await params.result_callback({
-                        "success": False,
-                        "transferred": False,
-                        "error": f"telnyx_error_{resp.status}",
-                    })
+                    await params.result_callback({"success": False, "transferred": False})
     except Exception as e:
-        logger.error(f"Telnyx transfer request failed with exception: {e}")
-        DemoDisplay.tool_result(f"Transfer error: {e}")
-        await params.result_callback({
-            "success": False,
-            "transferred": False,
-            "error": "transfer_request_exception",
-        })
+        logger.error(f"Transfer exception: {e}")
+        await params.result_callback({"success": False, "transferred": False})
 
 
 async def end_call(params: FunctionCallParams, farewell: str):
-    """End the call politely. Use once the caller has said goodbye and there's nothing left
-    to do — e.g. right after a meeting is booked and the caller signs off, after logging a
-    lead, or if they explicitly ask to hang up.
-
-    The `farewell` you pass here is SPOKEN ALOUD to the caller before the line disconnects,
-    so it must be a complete, warm sign-off — never empty, never a placeholder. Do not also
-    say goodbye in your own reply text before calling this; this tool speaks the goodbye for
-    you, so saying it twice would make the caller hear it twice.
+    """End the call politely once all questions are answered or caller is ready to hang up.
 
     Args:
-        farewell: The exact goodbye line to speak before hanging up, e.g. "Perfect — you're
-            all set for Tuesday at 2 PM. Thanks for calling Innoventix Hub, have a great
-            day!" Keep it to one or two warm sentences, tailored to how the call went.
+        farewell: The complete, spoken goodbye line (1-2 sentences).
     """
-    # Speak the goodbye FIRST, then signal shutdown — and push the end frame UPSTREAM, not
-    # downstream. EndWorkerFrame tears the pipeline down, so if it were pushed straight from
-    # here (downstream, toward TTS/transport) it could race past the farewell audio and cut
-    # the line before the caller hears it. Pushed upstream, it travels to the start of the
-    # pipeline and flows back down through every stage in order, landing BEHIND the
-    # already-queued farewell — so the audio plays out before the pipeline tears down. This
-    # mirrors Pipecat's documented graceful-termination pattern.
     DemoDisplay.tool_action("Ending call with farewell...")
     DemoDisplay.bot_said(farewell)
     await params.result_callback({"success": True})
@@ -498,11 +413,15 @@ async def end_call(params: FunctionCallParams, farewell: str):
     await params.llm.push_frame(EndWorkerFrame(), FrameDirection.UPSTREAM)
 
 
-INNOVENTIX_TOOLS = [
-    check_availability,
-    book_meeting,
-    send_booking_link,
-    mark_potential_lead,
+HACKTOBERFEST_TOOLS = [
+    search_events,
+    get_event_details,
+    get_registration_link,
+    send_event_email,
+    send_event_sms,
     transfer_to_human,
     end_call,
 ]
+
+# Aliases for backwards compatibility
+INNOVENTIX_TOOLS = HACKTOBERFEST_TOOLS

@@ -1,108 +1,77 @@
 """
-Comprehensive end-to-end test scenarios covering all 4 core call scenarios + extra flows:
+End-to-end test scenarios for HackWhisper: AI Hacktoberfest Voice Calling Agent.
 
-Scenario A — Sales booking (Cal.com booking + confirmation email)
-Scenario B — Warm lead capture (interested caller who doesn't commit)
-Scenario C — General info inquiry (no tools, pure knowledge-base Q&A)
-Scenario D — Cross-sell flow (Known customer injected context -> AI Voice Agents pitch -> Sales booking)
-Scenario E — Support escalation (Known customer -> unresolved tech issue -> Support meeting)
-Scenario F — Booking link request (Caller asks for link by email -> send_booking_link)
-Scenario G — Immediate human transfer (Urgent request -> transfer_to_human)
+Scenario A — City Event Search + SMS Dispatch (User asks for events in Kolkata, gets registration link texted)
+Scenario B — General Hacktoberfest Inquiry (Rules, eligibility, PR requirements, rewards)
+Scenario C — City Event Search + Email Dispatch (User asks for events in London, gets email confirmation)
+Scenario D — Detailed Event Schedule & Venue Lookup
+Scenario E — Organizer / Human Transfer
 
-Run:  python test_scenario.py
+Run: python test_scenario.py
 """
+
 import asyncio
 import json
 import os
+import sys
+
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
 import openai
-
-import booking_db
-import cal_com as scheduler
+import event_manager
+import sms_sender
 import email_sender
-from prompts import INNOVENTIX_SYSTEM_PROMPT, get_system_prompt
+from prompts import HACKTOBERFEST_SYSTEM_PROMPT, get_system_prompt
 from tools import _normalize_email
 
-# ---------------------------------------------------------------------------
-# Scenarios
-# ---------------------------------------------------------------------------
 SCENARIOS = {
-    "A — Sales Booking (Cal.com)": {
+    "A — City Event Search & SMS Dispatch": {
         "context": None,
         "turns": [
-            "Hi, I run a dental clinic and I'm looking for an AI voice agent to handle our incoming appointment calls. Can Innoventix Hub help with that?",
-            "That sounds exactly like what we need. What are the next steps?",
-            "Yes let's book a call. My name is Ahmed.",
-            "Let's do the first available slot.",
-            "My email is ahmed dot clinic at gmail dot com.",
-            "Yes that details are correct.",
+            "Hi, what Hacktoberfest events are happening in Kolkata this year?",
+            "That sounds great. Can you send me the registration link on SMS to my phone number?",
+            "Yes, please text it to this number.",
         ],
     },
-    "B — Warm Lead (interested but not ready)": {
+    "B — General Info Inquiry (Rules & Rewards)": {
         "context": None,
         "turns": [
-            "Hi, I saw your post about AI automation. We're a small e-commerce brand and I'm curious if you could automate our order follow-ups.",
-            "That sounds great. How much would something like that cost?",
-            "Hmm, I'd need to discuss the budget with my business partner first. I'll call back.",
+            "Hey, can you explain what Hacktoberfest is?",
+            "How many pull requests do I need to make to complete the challenge?",
+            "Are beginners allowed to join, or is it only for experienced developers?",
+            "Thanks for the info, that's really helpful!",
         ],
     },
-    "C — General Info Inquiry (no booking)": {
+    "C — Event Search & Email Dispatch": {
         "context": None,
         "turns": [
-            "Hey, can you tell me what services Innoventix Hub offers?",
-            "Who's on the team?",
-            "Do you do custom mobile apps?",
-            "Alright, thanks for the info. I'll think about it.",
+            "Hello, are there any Hacktoberfest events in London?",
+            "Can you email me the event details and registration link?",
+            "My name is Alex and my email is alex dot developer at gmail dot com.",
+            "Yes, that email address is correct.",
         ],
     },
-    "D — Cross-sell (Known customer)": {
-        "context": "[KNOWN CALLER CONTEXT: This caller is an existing customer, name=Sarah, purchased=AI Automation. Use this per the CROSS-SELL scenario in your instructions — never mention this context to the caller directly.]",
-        "turns": [
-            "Hi there, just wanted to see how things are going with our automation setup.",
-            "Oh really? Tell me more about AI Voice Agents.",
-            "That sounds perfect for our front desk. Can we schedule a sales call to discuss adding voice agents?",
-            "Let's book it. Name is Sarah, email is sarah at company dot com.",
-            "The first available slot works.",
-            "Yes, that's all correct.",
-        ],
-    },
-    "E — Support Escalation (Known customer)": {
-        "context": "[KNOWN CALLER CONTEXT: This caller is an existing customer, name=David, purchased=Web Development. Use this per the CROSS-SELL scenario in your instructions — never mention this context to the caller directly.]",
-        "turns": [
-            "Hi, our website forms suddenly stopped submitting lead notifications to our CRM yesterday after the update.",
-            "I checked the settings already and the API key looks right. Can someone from tech support take a look with me?",
-            "Yes, let's schedule a support meeting. Name is David, email is david at techcorp dot com.",
-            "The first slot is fine.",
-            "Yes, confirmed.",
-        ],
-    },
-    "F — Booking Link Request": {
+    "D — Event Details & Schedule Lookup": {
         "context": None,
         "turns": [
-            "Hi, I'm interested in Content Creation for our brand.",
-            "Can you just email me a booking link so I can pick a time with my team later?",
-            "My name is Maria and my email is maria at brand dot com.",
-            "Yes that email is correct.",
+            "I'm looking for event details for the Hack Day in Kolkata.",
+            "What format is it and what time does it start?",
+            "Great, thanks for the details!",
         ],
     },
-    "G — Human Transfer Request": {
+    "E — Live Organizer Transfer Request": {
         "context": None,
         "turns": [
-            "Hi, our payment gateway is down and production servers are throwing 500 errors! I need to talk to a human engineer immediately!",
-        ],
-    },
-    "H — Whole Week Availability & Day Selection": {
-        "context": None,
-        "turns": [
-            "Hi, I want to talk to your team about building an AI voice agent for our customer support.",
-            "Can you tell me what days and times you have open across this entire week?",
-            "What options do you have specifically on Thursday?",
-            "Let's book Thursday. My name is Alex, email is alex dot test at innoventix dot com.",
-            "Yes, that's confirmed.",
+            "Hi, I'm having trouble with our community venue sponsorship and I need to speak to an event organizer right away.",
         ],
     },
 }
@@ -111,63 +80,67 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
-            "name": "check_availability",
-            "description": "Look up open meeting slots from Cal.com.",
+            "name": "search_events",
+            "description": "Search for Hacktoberfest events taking place in a specific city, state, or region.",
             "parameters": {
                 "type": "object",
-                "properties": {"meeting_type": {"type": "string", "enum": ["sales", "support"]}},
-                "required": ["meeting_type"],
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "book_meeting",
-            "description": "Book a meeting slot once caller confirms details.",
+            "name": "get_event_details",
+            "description": "Retrieve full schedule, venue address, format, and description for a specific event.",
+            "parameters": {
+                "type": "object",
+                "properties": {"event_id": {"type": "string"}},
+                "required": ["event_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_registration_link",
+            "description": "Get the official registration link and website for an event.",
+            "parameters": {
+                "type": "object",
+                "properties": {"event_id": {"type": "string"}},
+                "required": ["event_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "send_event_email",
+            "description": "Email Hacktoberfest event details and registration link to the caller.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "meeting_type": {"type": "string"},
-                    "start_time": {"type": "string"},
-                    "customer_name": {"type": "string"},
                     "email": {"type": "string"},
-                    "topic": {"type": "string"},
-                    "phone": {"type": "string"},
+                    "event_id": {"type": "string"},
+                    "attendee_name": {"type": "string"},
                 },
-                "required": ["meeting_type", "start_time", "customer_name", "email", "topic"],
+                "required": ["email", "event_id"],
             },
         },
     },
     {
         "type": "function",
         "function": {
-            "name": "send_booking_link",
-            "description": "Email the caller a direct link to the booking page without creating a meeting.",
+            "name": "send_event_sms",
+            "description": "Send Hacktoberfest event details and registration link directly via SMS.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "customer_name": {"type": "string"},
-                    "email": {"type": "string"},
+                    "event_id": {"type": "string"},
+                    "phone_number": {"type": "string"},
                 },
-                "required": ["customer_name", "email"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "mark_potential_lead",
-            "description": "Log a warm lead who showed interest but did not commit.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "customer_name": {"type": "string"},
-                    "interested_service": {"type": "string"},
-                    "reason": {"type": "string"},
-                    "phone": {"type": "string"},
-                },
-                "required": ["customer_name", "interested_service", "reason"],
+                "required": ["event_id"],
             },
         },
     },
@@ -175,7 +148,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "transfer_to_human",
-            "description": "Flag an urgent request for a human. Live transfer is not wired up yet — check transferred:false in the result.",
+            "description": "Transfer caller to a human organizer or support specialist.",
             "parameters": {
                 "type": "object",
                 "properties": {"reason": {"type": "string"}},
@@ -187,7 +160,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "end_call",
-            "description": "End the call politely after saying a warm farewell.",
+            "description": "Politely end the phone call with a warm farewell.",
             "parameters": {
                 "type": "object",
                 "properties": {"farewell": {"type": "string"}},
@@ -199,188 +172,142 @@ TOOLS_SCHEMA = [
 
 
 async def handle_tool(name: str, args: dict) -> str:
-    """Execute each tool and print execution details."""
-    if name == "check_availability":
-        mtype = args.get("meeting_type", "sales")
-        print(f"  [TOOL] check_availability(meeting_type={mtype})")
-        slots = await scheduler.get_open_slots(mtype, limit=20)
-        seen_days = []
-        for s in slots:
-            d = s.get("date", "")
-            if d and d not in seen_days:
-                seen_days.append(d)
-        week_summary = f"Openings available across {len(seen_days)} days this week: {', '.join(seen_days)}."
-        if slots:
-            print(f"  [OK] Returned {len(slots)} open slots across {len(seen_days)} days ({', '.join(seen_days)})")
-        else:
-            print("  [WARN] No slots returned")
+    """Execute each Hacktoberfest tool and print execution details."""
+    if name == "search_events":
+        city = args.get("city", "")
+        print(f"  [TOOL] search_events(city='{city}')")
+        results = await event_manager.search_events_by_city(city, limit=4)
+        print(f"  [RESULT] Found {len(results)} matching events.")
         return json.dumps({
             "success": True,
-            "week_summary": week_summary,
-            "available_days": seen_days,
-            "slots": slots,
+            "found": len(results) > 0,
+            "city": city,
+            "count": len(results),
+            "events": results,
         })
 
-    elif name == "book_meeting":
+    elif name == "get_event_details":
+        event_id = args.get("event_id", "")
+        print(f"  [TOOL] get_event_details(event_id='{event_id[:16]}')")
+        ev = await event_manager.get_event_by_id_or_name(event_id)
+        if ev:
+            print(f"  [RESULT] Event: {ev['name']}")
+            return json.dumps({"success": True, **ev})
+        return json.dumps({"success": False, "error": "not_found"})
+
+    elif name == "get_registration_link":
+        event_id = args.get("event_id", "")
+        print(f"  [TOOL] get_registration_link(event_id='{event_id[:16]}')")
+        ev = await event_manager.get_event_by_id_or_name(event_id)
+        url = ev.get("registration_url") if ev else "https://hacktoberfest.com"
+        print(f"  [RESULT] URL: {url}")
+        return json.dumps({"success": True, "registration_url": url})
+
+    elif name == "send_event_email":
         email = _normalize_email(args.get("email", ""))
-        print(f"  [TOOL] book_meeting(name={args.get('customer_name')}, email={email}, start_time={args.get('start_time')})")
-        
-        # Use sandbox-compatible owner email address for automated test runs
-        test_target_email = os.getenv("TEST_EMAIL", "ashadabbasi.963@gmail.com")
-
-        result = await scheduler.book_slot(
-            meeting_type=args.get("meeting_type", "sales"),
-            start_time=args.get("start_time", ""),
-            customer_name=args.get("customer_name", "Unknown"),
-            phone=args.get("phone", "+1234567890"),
-            email=test_target_email,
-            topic=args.get("topic", "General Discussion"),
-        )
-        print(f"  [BOOKING] success={result['success']}, meet_link={result.get('meet_link')}, error={result.get('error')}")
-
-        if result["success"]:
-            date_str, time_str = scheduler.format_display(args["start_time"])
-            print(f"  [EMAIL] Sending booking confirmation to {test_target_email}...")
-            er = await email_sender.send_meeting_confirmation(
-                to=test_target_email,
-                customer_name=args["customer_name"],
-                date=date_str,
-                time_str=time_str,
-                meet_link=result["meet_link"],
-                meeting_type=args.get("meeting_type", "sales"),
+        event_id = args.get("event_id", "")
+        name_str = args.get("attendee_name", "Alex")
+        print(f"  [TOOL] send_event_email(email='{email}', event_id='{event_id[:16]}')")
+        ev = await event_manager.get_event_by_id_or_name(event_id)
+        if ev:
+            res = await email_sender.send_event_email(
+                to=email,
+                customer_name=name_str,
+                event_name=ev["name"],
+                starts_at_str=ev.get("starts_at_str", ""),
+                city=ev.get("city", ""),
+                venue=ev.get("address", ""),
+                description=ev.get("description", ""),
+                registration_url=ev.get("registration_url", ""),
             )
-            print(f"  [EMAIL] Confirmation status: {er.get('success')}")
-            await booking_db.log_meeting(
-                meeting_type=args.get("meeting_type", "sales"),
-                customer_name=args["customer_name"],
-                phone=args.get("phone", "+1234567890"),
-                email=email,
-                topic=args.get("topic", "General Discussion"),
-                date=date_str,
-                time_str=time_str,
-                meet_link=result["meet_link"],
-                call_id="test-scenario-session",
+            print(f"  [EMAIL DISPATCH] success={res.get('success')}")
+            return json.dumps({"success": res.get("success"), "email": email})
+        return json.dumps({"success": False, "error": "event_not_found"})
+
+    elif name == "send_event_sms":
+        phone = args.get("phone_number") or "+15075010702"
+        event_id = args.get("event_id", "")
+        print(f"  [TOOL] send_event_sms(phone='{phone}', event_id='{event_id[:16]}')")
+        ev = await event_manager.get_event_by_id_or_name(event_id)
+        if ev:
+            res = await sms_sender.send_event_sms(
+                to_phone=phone,
+                event_name=ev["name"],
+                starts_at_str=ev.get("starts_at_str", ""),
+                city=ev.get("city", ""),
+                registration_url=ev.get("registration_url", ""),
             )
-            return json.dumps({"success": True, "meet_link": result["meet_link"]})
-        else:
-            booking_url = os.getenv("CAL_BOOKING_URL", "")
-            fallback_sent = False
-            if email and booking_url:
-                print(f"  [FALLBACK] Sending fallback email to {test_target_email}...")
-                fb = await email_sender.send_booking_fallback_email(
-                    to=test_target_email, customer_name=args["customer_name"], booking_url=booking_url
-                )
-                fallback_sent = fb.get("success", False)
-            return json.dumps({"success": False, "error": result.get("error"), "fallback_link_sent": fallback_sent})
-
-    elif name == "send_booking_link":
-        email = _normalize_email(args.get("email", ""))
-        test_target_email = os.getenv("TEST_EMAIL", "ashadabbasi.963@gmail.com")
-        print(f"  [TOOL] send_booking_link(name={args.get('customer_name')}, email={email})")
-        booking_url = os.getenv("CAL_BOOKING_URL", "")
-        res = await email_sender.send_booking_fallback_email(
-            to=test_target_email, customer_name=args.get("customer_name", "Caller"), booking_url=booking_url
-        )
-        print(f"  [EMAIL] Link sent: {res.get('success')}")
-        return json.dumps(res)
-
-    elif name == "mark_potential_lead":
-        print(f"  [TOOL] mark_potential_lead(name={args.get('customer_name')}, service={args.get('interested_service')})")
-        result = await booking_db.create_lead(
-            name=args.get("customer_name", "Unknown"),
-            phone=args.get("phone", "+1234567890"),
-            interested_service=args.get("interested_service", "General"),
-            reason=args.get("reason", "Needs to check budget"),
-            call_id="test-scenario-session",
-        )
-        print(f"  [LEAD] Logged lead: success={result.get('success')}")
-        return json.dumps(result)
+            print(f"  [SMS DISPATCH] success={res.get('success')}")
+            return json.dumps({"success": res.get("success"), "phone": phone})
+        return json.dumps({"success": False, "error": "event_not_found"})
 
     elif name == "transfer_to_human":
-        print(f"  [TOOL] transfer_to_human(reason={args.get('reason')}) -> transferred=False (not wired up)")
-        return json.dumps({"success": True, "transferred": False, "reason_logged": args.get("reason")})
+        reason = args.get("reason", "")
+        print(f"  [TOOL] transfer_to_human(reason='{reason}')")
+        return json.dumps({"success": True, "transferred": True, "target": "+19177954404"})
 
     elif name == "end_call":
         farewell = args.get("farewell", "")
-        print(f"  [TOOL] end_call(farewell={farewell!r}) — call ended.")
-        if not farewell.strip():
-            print("  [WARN] end_call called with an empty farewell — this should never happen.")
-        return json.dumps({"success": True})
+        print(f"  [TOOL] end_call(farewell='{farewell}')")
+        return json.dumps({"success": True, "call_ended": True})
 
-    return json.dumps({"error": "unknown_tool"})
+    return json.dumps({"error": f"Unknown tool {name}"})
 
 
-async def run_scenario(label: str, spec: dict, client, model: str):
-    import time
-    scen_start = time.time()
-    print()
-    print("=" * 70)
-    print(f"  SCENARIO: {label}")
-    print("=" * 70)
+async def run_scenario(name: str, sc: dict):
+    print(f"\n{'='*70}\nRunning: {name}\n{'='*70}")
+    await event_manager.sync_events()
+
+    client = openai.AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     messages = [{"role": "system", "content": get_system_prompt()}]
-    if spec.get("context"):
-        messages.append({"role": "user", "content": spec["context"]})
+    if sc.get("context"):
+        messages.append({"role": "user", "content": sc["context"]})
 
-    for i, user_turn in enumerate(spec["turns"]):
-        print(f"\n[Turn {i+1}] Caller: {user_turn}")
+    for user_turn in sc["turns"]:
+        print(f"\nUser: {user_turn}")
         messages.append({"role": "user", "content": user_turn})
 
         while True:
             resp = await client.chat.completions.create(
-                model=model, messages=messages,
-                tools=TOOLS_SCHEMA, tool_choice="auto",
+                model=model,
+                messages=messages,
+                tools=TOOLS_SCHEMA,
+                tool_choice="auto",
+                temperature=0.3,
+                max_tokens=150,
             )
             msg = resp.choices[0].message
+            messages.append(msg)
+
+            if msg.content:
+                print(f"Whisper: {msg.content}")
 
             if msg.tool_calls:
-                messages.append(msg)
                 for tc in msg.tool_calls:
-                    args = json.loads(tc.function.arguments)
-                    result_str = await handle_tool(tc.function.name, args)
+                    fn_name = tc.function.name
+                    fn_args = json.loads(tc.function.arguments)
+                    result_str = await handle_tool(fn_name, fn_args)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
                         "content": result_str,
                     })
-            else:
-                reply = msg.content or ""
-                print(f"   Bot: {reply}")
-                messages.append({"role": "assistant", "content": reply})
-                break
-
-    # Save call record to Supabase call_logs table
-    await booking_db.save_call_record(
-        call_id=f"scen-{int(time.time())}-{label[0]}",
-        caller_phone="+1234567890",
-        start_time=scen_start,
-        messages=messages,
-    )
+                continue
+            break
 
 
 async def main():
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        print("ERROR: OPENAI_API_KEY not set in .env")
+    if not os.getenv("OPENAI_API_KEY"):
+        print("OPENAI_API_KEY not set in .env. Skipping live LLM scenario tests.")
         return
 
-    client = openai.AsyncOpenAI(api_key=api_key)
-    model = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
-
-    print("=" * 70)
-    print("  INNOVENTIX HUB -- FULL SCENARIO TEST SUITE (7 SCENARIOS)")
-    print("=" * 70)
-    print(f"  Model    : {model}")
-    print(f"  Timezone : {os.getenv('TIMEZONE', 'UTC')}")
-    print(f"  Scenarios: {len(SCENARIOS)}")
-
-    for label, spec in SCENARIOS.items():
-        await run_scenario(label, spec, client, model)
-
-    print()
-    print("=" * 70)
-    print("  ALL SCENARIOS COMPLETE & VERIFIED")
-    print("=" * 70)
+    for sc_name, sc in SCENARIOS.items():
+        try:
+            await run_scenario(sc_name, sc)
+        except Exception as e:
+            print(f"Error in {sc_name}: {e}")
 
 
 if __name__ == "__main__":

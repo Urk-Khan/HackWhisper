@@ -1,9 +1,9 @@
 """
-Demo Display & Live Transcript Console for Innoventix Hub Voice Agent.
+Demo Display & Live Transcript Console for HackWhisper: Hacktoberfest AI Voice Agent.
 
 Provides a clean, professional, video-recording-ready terminal interface:
 - Silences noisy library/debug logs on the console and routes them to `logs/call_debug.log`.
-- Displays a clean visual transcript showing what the caller says, Clara's responses,
+- Displays a clean visual transcript showing what the caller says, Whisper's responses,
   live processing status, and business tool actions in real time.
 """
 
@@ -89,9 +89,9 @@ class DemoDisplay:
     @classmethod
     def banner(cls, phone_number: str = "+1 (855) 501-0702", provider: str = "Telnyx"):
         print(f"\n{BOLD}{CYAN}+==============================================================================+{RESET}")
-        print(f"{BOLD}{CYAN}|                      INNOVENTIX HUB  *  AI VOICE AGENT                       |{RESET}")
-        print(f"{BOLD}{CYAN}|     Agent: Clara (AI Concierge)    |    Telephony: {provider:<14}            |{RESET}")
-        print(f"{BOLD}{CYAN}|     Status: Online & Ready         |    Number: {phone_number:<17}       |{RESET}")
+        print(f"{BOLD}{CYAN}|                 HACKWHISPER  *  HACKTOBERFEST AI VOICE AGENT                 |{RESET}")
+        print(f"{BOLD}{CYAN}|     Agent: Whisper (Voice Assistant)|    Telephony: {provider:<14}            |{RESET}")
+        print(f"{BOLD}{CYAN}|     Status: Online & Ready          |    Number: {phone_number:<17}       |{RESET}")
         print(f"{BOLD}{CYAN}+==============================================================================+{RESET}\n")
         print(f"{DIM}Ready for incoming calls. Dial {phone_number} to start demo.{RESET}\n")
 
@@ -105,7 +105,7 @@ class DemoDisplay:
         print(f"\n{BOLD}{GREEN}+------------------------------------------------------------------------------+{RESET}")
         print(f"{BOLD}{GREEN}|  >> INCOMING CALL CONNECTED                                                  |{RESET}")
         print(f"{BOLD}{GREEN}|  Caller: {phone:<22}                                    |{RESET}")
-        print(f"{BOLD}{GREEN}|  Agent:  Clara (Innoventix Hub Voice Concierge)                              |{RESET}")
+        print(f"{BOLD}{GREEN}|  Agent:  Whisper (Hacktoberfest AI Voice Assistant)                          |{RESET}")
         if short_id:
             print(f"{BOLD}{GREEN}|  Session ID: {short_id:<20}                                            |{RESET}")
         print(f"{BOLD}{GREEN}+------------------------------------------------------------------------------+{RESET}\n")
@@ -122,12 +122,12 @@ class DemoDisplay:
         if not cleaned or cleaned == cls._last_caller_text:
             return
         cls._last_caller_text = cleaned
-        print(f"{DIM}[{_timestamp()}]{RESET} {BOLD}{GREEN}Caller >{RESET} \"{cleaned}\"")
+        print(f"{DIM}[{_timestamp()}]{RESET} {BOLD}{GREEN}Caller  >{RESET} \"{cleaned}\"")
 
     @classmethod
     def bot_thinking(cls):
         """Shows that the bot is processing and formulating a response."""
-        print(f"{DIM}[{_timestamp()}]{RESET} {MAGENTA}[Processing] Clara is thinking...{RESET}")
+        print(f"{DIM}[{_timestamp()}]{RESET} {MAGENTA}[Processing] Whisper is thinking...{RESET}")
 
     @classmethod
     def bot_said(cls, text: str):
@@ -136,7 +136,7 @@ class DemoDisplay:
         if not cleaned or cleaned == cls._last_bot_text:
             return
         cls._last_bot_text = cleaned
-        print(f"{DIM}[{_timestamp()}]{RESET} {BOLD}{CYAN}Clara  >{RESET} \"{cleaned}\"")
+        print(f"{DIM}[{_timestamp()}]{RESET} {BOLD}{CYAN}Whisper >{RESET} \"{cleaned}\"")
 
     @classmethod
     def tool_action(cls, description: str):
