@@ -1,0 +1,91 @@
+.page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(circle at 20% 20%, #1a2230 0%, transparent 45%),
+    var(--bg);
+}
+
+.card {
+  width: 340px;
+  padding: 36px 32px 32px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+}
+
+.mark {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 20px;
+}
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 0 4px var(--amber-dim);
+}
+
+.title {
+  font-size: 19px;
+}
+
+.subtitle {
+  color: var(--text-muted);
+  font-size: 13.5px;
+  margin: 8px 0 24px;
+}
+
+.label {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--text);
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.input:focus {
+  border-color: var(--amber);
+}
+
+.error {
+  color: var(--red);
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+
+.button {
+  margin-top: 20px;
+  background: var(--amber);
+  color: #1a1305;
+  border: none;
+  border-radius: 8px;
+  padding: 11px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.button:hover {
+  background: #f0ad4e;
+}

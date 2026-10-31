@@ -1,0 +1,13 @@
+.statusCell {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.select {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+}

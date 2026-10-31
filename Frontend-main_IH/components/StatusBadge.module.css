@@ -1,0 +1,35 @@
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.amber {
+  color: var(--amber);
+  background: var(--amber-dim);
+}
+
+.teal {
+  color: var(--teal);
+  background: var(--teal-dim);
+}
+
+.red {
+  color: var(--red);
+  background: var(--red-dim);
+}
+
+.blue {
+  color: var(--blue);
+  background: var(--blue-dim);
+}
+
+.neutral {
+  color: var(--text-muted);
+  background: var(--panel-raised);
+}

@@ -1,0 +1,14 @@
+venv/
+venv312/
+__pycache__/
+*.pyc
+.env
+.env*.local
+# Google service account key — never commit this
+service-account.json
+# Audio recordings and logs
+call_recordings/
+*.wav
+*.mp3
+logs/
+*.log

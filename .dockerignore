@@ -1,0 +1,10 @@
+.git
+.github
+Backend-main_IH/venv
+Backend-main_IH/.venv
+Backend-main_IH/__pycache__
+Backend-main_IH/*.wav
+Backend-main_IH/*.log
+Backend-main_IH/cloudflared.exe
+Frontend-main_IH/node_modules
+Frontend-main_IH/.next

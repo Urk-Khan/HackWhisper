@@ -1,0 +1,80 @@
+.sidebar {
+  width: var(--sidebar-width);
+  flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 24px 16px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 4px 6px;
+  margin-bottom: 24px;
+  text-decoration: none;
+  border-radius: 8px;
+  transition: opacity 0.2s ease, background 0.2s ease;
+}
+
+.brand:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.brandLogo {
+  width: 100%;
+  max-width: 175px;
+  height: auto;
+  display: block;
+  object-fit: contain;
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.25));
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.link {
+  padding: 9px 12px;
+  border-radius: 7px;
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 13.5px;
+  font-weight: 500;
+}
+
+.link:hover {
+  color: var(--text);
+  background: var(--panel-raised);
+}
+
+.linkActive {
+  color: var(--text);
+  background: var(--panel-raised);
+}
+
+.logoutForm {
+  margin-top: auto;
+}
+
+.logout {
+  width: 100%;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  color: var(--text-muted);
+  padding: 8px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.logout:hover {
+  color: var(--text);
+  border-color: var(--text-faint);
+}
